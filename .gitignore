@@ -23,4 +23,6 @@ pip-delete-this-directory.txt
 *.jpg
 *.jpeg
 maze_data.npy
+macro_field_data.npy
+
 
