@@ -119,7 +119,8 @@ class ProbabilityFluxField:
             self.macro_field = (self.macro_field - min_val) / (max_val - min_val)
         else:
             self.macro_field = np.zeros_like(self.macro_field)
-
+        # 将算好的宏观场保存到本地，方便随时 3D 预览
+        np.save('macro_field_data.npy', self.macro_field)
         print("Flux field generation complete.")
 
     def render_field_with_reference(self, original_maze: np.ndarray, save_path: str = "flux_field_compare.png"):
