@@ -63,13 +63,17 @@ class ProbabilityFluxField:
                     touches_left = np.any(mask[:, 0])
                     touches_right = np.any(mask[:, w_c-1]) if w_c > 1 else False
                     num_borders = sum([touches_top, touches_bottom, touches_left, touches_right])
+                    
                     chunk_flux[mask] = 1.0 if num_borders >= 2 else 0.05
+                
                 self.flux_matrix[y_start:y_end, x_start:x_end] += chunk_flux
 
         sigma = max(1.0, self.delta_x / 4.0)
         blurred_field = scipy.ndimage.gaussian_filter(self.flux_matrix, sigma=sigma)
+
         min_val, max_val = blurred_field.min(), blurred_field.max()
         normalized_field = (blurred_field - min_val) / (max_val - min_val) if max_val > min_val else np.zeros_like(blurred_field)
+        
         self.macro_field = np.power(normalized_field, 1.5)
         min_val, max_val = self.macro_field.min(), self.macro_field.max()
         self.macro_field = (self.macro_field - min_val) / (max_val - min_val) if max_val > min_val else np.zeros_like(self.macro_field)
@@ -79,10 +83,12 @@ class Agent:
     """The final intelligent agent with the Wavefront Envelope search."""
     def __init__(self, maze_matrix, macro_field):
         self.maze = maze_matrix
-        self.macro_field = np.copy(macro_field)
+        self.macro_field = np.copy(macro_field) # Use a copy to allow local modifications
         self.rows, self.cols = maze_matrix.shape
+        
         self.start_pos = (1, 1)
         self.end_pos = (self.rows - 2, self.cols - 2)
+        
         self.current_pos = self.start_pos
         self.last_pos = None 
         self.path =[self.start_pos]
@@ -179,7 +185,6 @@ def run_physics_analysis():
 
     start_time_total = time.time()
     for i in range(N_RUNS):
-        # --- Run the full in-memory pipeline ---
         maze = MazeEnvironment(width=65, height=65).maze
         flux_field = ProbabilityFluxField(maze_matrix=maze, delta_x=16)
         flux_field.generate_field()
@@ -188,12 +193,12 @@ def run_physics_analysis():
         for _ in range(maze.size):
             if agent.step(): break
         
-        # --- Collect non-trivial computational costs ---
         bursts = [p for p in agent.delta_p_list if p > 1]
         if bursts:
             all_bursts.extend(bursts)
         
-        print(f"Run {i+1}/{N_RUNS} completed...")
+        if (i + 1) % 10 == 0:
+            print(f"Run {i+1}/{N_RUNS} completed...")
         plt.close('all')
 
     print(f"\nData collection finished in {time.time() - start_time_total:.2f}s.")
@@ -203,74 +208,72 @@ def run_physics_analysis():
         print("No wavefront bursts were triggered. Cannot perform analysis.")
         return
 
-    # --- Statistical Processing and Plotting ---
     bursts_array = np.array(all_bursts)
-    
-    # Create logarithmically spaced bins for the histogram
     bins = np.logspace(np.log10(min(bursts_array)), np.log10(max(bursts_array)), 20)
     hist, bin_edges = np.histogram(bursts_array, bins=bins, density=True)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    
-    # Filter out zero-count bins for log-log plot
     non_zero_mask = hist > 0
     bin_centers_fit = bin_centers[non_zero_mask]
     hist_fit = hist[non_zero_mask]
 
-    # --- Visualization ---
     fig = plt.figure(figsize=(16, 8))
     fig.suptitle('Physics Analysis of Computational Cost (Δp)', fontsize=16)
 
-    # 1. Left Plot: Log-Log Power Law Analysis
+    # 1. Right Plot (as it was originally): Log-Log Power Law Analysis
     ax1 = fig.add_subplot(122)
-    ax1.loglog(bin_centers_fit, hist_fit, 'o', color='cyan', label='Data (Log-Binned PDF)')
-    
-    # Fit the power law
-    alpha = -1.5 # Initial guess
+    ax1.loglog(bin_centers_fit, hist_fit, 'o', color='cyan', markersize=8, label='Data (Log-Binned PDF)')
+    alpha = -1.5 
     try:
         popt, _ = curve_fit(power_law_func, bin_centers_fit, hist_fit, p0=[alpha, np.max(hist_fit)])
         alpha = popt[0]
-        ax1.loglog(bin_centers_fit, power_law_func(bin_centers_fit, *popt), 'r-', 
+        ax1.loglog(bin_centers_fit, power_law_func(bin_centers_fit, *popt), 'r-', lw=2,
                    label=f'Power Law Fit (α = {alpha:.2f})')
     except RuntimeError:
         print("Curve fit failed. The data may not follow a power law.")
         alpha = None
-
     ax1.set_title('Power Law Distribution of Δp')
     ax1.set_xlabel('Computational Burst Size (Log Δp)')
     ax1.set_ylabel('Probability Density (Log PDF)')
     ax1.legend()
     ax1.grid(True, which="both", ls="--", alpha=0.5)
 
-    # 2. Right Plot: Lorenz Curve (Pareto Analysis)
+    # 2. Left Plot (as it was originally): Lorenz Curve (Pareto Analysis)
     ax2 = fig.add_subplot(121)
     sorted_bursts = np.sort(bursts_array)
     cum_bursts = np.cumsum(sorted_bursts)
-    
-    # Create Lorenz curve data
     x_lorenz = np.linspace(0., 1., len(cum_bursts))
     y_lorenz = cum_bursts / cum_bursts[-1]
-    
     ax2.plot(x_lorenz, y_lorenz, color='magenta', lw=2, label='Lorenz Curve')
-    ax2.plot([0, 1], [0, 1], 'k--', label='Line of Equality')
-    
-    # Calculate and display the 80/20 rule equivalent
+    ax2.plot([0, 1], [0, 1], 'k--', lw=1, label='Line of Equality')
+    ax2.fill_between(x_lorenz, y_lorenz, x_lorenz, color='magenta', alpha=0.2)
+
+    # --- CORRECTED PARETO ANALYSIS ---
+    pareto_x_consumes_80_percent = None
+    cost_consumed_by_top_20_percent = None
     try:
-        idx_80 = np.searchsorted(y_lorenz, 0.8)
-        x_at_80 = x_lorenz[idx_80]
-        pareto_x = (1 - x_at_80) * 100
-        pareto_text = f'Top {pareto_x:.1f}% of bursts consume 80% of total Δp'
-        ax2.fill_between(x_lorenz, y_lorenz, x_lorenz, color='magenta', alpha=0.2)
-        ax2.annotate(pareto_text, xy=(x_at_80, 0.8), xytext=(x_at_80 - 0.4, 0.9),
+        # What % of top bursts consume 80% of cost?
+        idx_for_80_percent_cost = np.searchsorted(y_lorenz, 0.2)
+        events_at_20_cost = x_lorenz[idx_for_80_percent_cost]
+        pareto_x_consumes_80_percent = (1 - events_at_20_cost) * 100
+        
+        # What % of cost is consumed by top 20% of bursts?
+        idx_for_20_percent_bursts = np.searchsorted(x_lorenz, 0.8)
+        cost_at_80_bursts = y_lorenz[idx_for_20_percent_bursts]
+        cost_consumed_by_top_20_percent = (1 - cost_at_80_bursts) * 100
+
+        # Add annotation to the plot
+        pareto_text = (f'Top 20% of most complex bursts\n'
+                       f'consume {cost_consumed_by_top_20_percent:.1f}% of total Δp')
+        ax2.annotate(pareto_text, xy=(0.8, cost_at_80_bursts), xytext=(0.35, 0.55),
                      arrowprops=dict(facecolor='white', shrink=0.05),
                      bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="k", lw=1, alpha=0.8))
-
     except (ValueError, IndexError):
-        pareto_x = None
+        print("Could not perform Pareto analysis.")
 
     ax2.set_title('Pareto Analysis of Computational Cost (Lorenz Curve)')
-    ax2.set_xlabel('Cumulative % of Bursts (Sorted by Cost)')
+    ax2.set_xlabel('Cumulative % of Bursts (Sorted from least to most costly)')
     ax2.set_ylabel('Cumulative % of Total Δp Cost')
-    ax2.legend()
+    ax2.legend(loc='upper left')
     ax2.grid(True, ls="--", alpha=0.5)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -286,10 +289,12 @@ def run_physics_analysis():
         print("  Interpretation: A value between -1 and -2 is typical for many\n"
               "  self-organized critical systems, indicating frequent small events\n"
               "  and increasingly rare, catastrophically large ones.")
-    if pareto_x is not None:
-        print(f"\nPareto Principle (80/20 Rule) Analysis:")
-        print(f"  The most complex {pareto_x:.1f}% of terrain challenges (bursts)\n"
-              f"  consumed 80% of the total computational energy (Δp).")
+    if pareto_x_consumes_80_percent is not None and cost_consumed_by_top_20_percent is not None:
+        print(f"\nPareto Principle Analysis:")
+        print(f"  - The top {pareto_x_consumes_80_percent:.1f}% of complex bursts "
+              f"consumed 80% of the total computational energy (Δp).")
+        print(f"  - Conversely, the top 20% of complex bursts "
+              f"consumed {cost_consumed_by_top_20_percent:.1f}% of the total energy.")
     print("="*60)
 
 if __name__ == '__main__':
