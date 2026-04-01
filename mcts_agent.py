@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+import heapq
 from collections import deque
 
 class Agent:
@@ -24,14 +25,20 @@ class Agent:
         self.forced_march_queue =[] 
         self.visited_freq = {} 
         self.trauma_memory = np.zeros_like(self.macro_field, dtype=float)
+        
+        # 【新增基因】：禁区信息素（永久封锁死胡同）
+        self.forbidden_cells = set()
 
     def get_physical_neighbors(self, pos):
+        """【基因受体】：底层的微观探测器，天然排斥禁区信息素"""
         y, x = pos
         neighbors =[]
         for dy, dx in[(0, 1), (0, -1), (1, 0), (-1, 0)]:
             ny, nx = y + dy, x + dx
             if 0 <= ny < self.rows and 0 <= nx < self.cols and self.maze[ny, nx] == 1:
-                neighbors.append((ny, nx))
+                # 只有没被封锁的格子，才是物理上的通路
+                if (ny, nx) not in self.forbidden_cells:
+                    neighbors.append((ny, nx))
         return neighbors
 
     def _apply_local_mark(self, center_pos):
@@ -56,6 +63,18 @@ class Agent:
             print(f"【死锁保护】触发：{self.current_pos}")
             return True
 
+        # ==========================================
+        # 【核心基因表达：死胡同级联封锁 (Dead-end Filling)】
+        # ==========================================
+        neighbors = self.get_physical_neighbors(self.current_pos)
+        
+        # 如果当前位置只有一个出口（且不是起终点），它绝对是死路或被证实为死路的长廊
+        if len(neighbors) == 1 and self.current_pos not in (self.start_pos, self.end_pos):
+            self.forbidden_cells.add(self.current_pos)
+            # 【视觉震撼】：一旦封锁，直接把这块宏观地形“砸穿”，变成黑洞！
+            self.macro_field[self.current_pos] = -1.0 
+        
+        # 执行强制行军
         if self.forced_march_queue:
             next_pos = self.forced_march_queue.pop(0)
             self.last_pos = self.current_pos
@@ -64,11 +83,16 @@ class Agent:
             self.delta_p_list.append(1) 
             return self.current_pos == self.end_pos
 
-        neighbors = self.get_physical_neighbors(self.current_pos)
         forward_neighbors =[n for n in neighbors if n != self.last_pos]
 
+        # 基因一：单行道无脑狂奔/退路
         if len(neighbors) == 1:
-            if not forward_neighbors: forward_neighbors = neighbors
+            next_pos = neighbors[0]
+            self.last_pos = self.current_pos
+            self.current_pos = next_pos
+            self.path.append(self.current_pos)
+            self.delta_p_list.append(1)
+            return self.current_pos == self.end_pos
         elif len(forward_neighbors) == 1:
             next_pos = forward_neighbors[0]
             self.last_pos = self.current_pos
@@ -77,6 +101,7 @@ class Agent:
             self.delta_p_list.append(1)
             return self.current_pos == self.end_pos
 
+        # 基因二：路口综合决策
         best_n = None
         best_score = -float('inf')
         for n in forward_neighbors:
@@ -89,15 +114,19 @@ class Agent:
         curr_dist = abs(self.current_pos[0] - self.end_pos[0]) + abs(self.current_pos[1] - self.end_pos[1])
         curr_score = self.macro_field[self.current_pos] - (curr_dist / (self.rows + self.cols)) * 0.1 - self.trauma_memory[self.current_pos]
 
+        # 基因三：绝境波前爆发
         if len(forward_neighbors) == 0 or best_score <= curr_score:
-            print(f"坐标 {self.current_pos} 遇阻！展开【双源终极波前搜索】...")
+            print(f"坐标 {self.current_pos} 遇阻！展开【定向波前搜索】...")
             self.mcts_triggers.append(self.current_pos)
             self._apply_local_mark(self.current_pos)
             
             escape_path, delta_p = self._wavefront_search(curr_dist)
             self.delta_p_list[-1] += delta_p
             
-            if not escape_path: return True
+            if not escape_path: 
+                print("所有火种熄灭，智能体停机。")
+                return True
+                
             self.forced_march_queue = escape_path
             return self.step() 
 
@@ -108,13 +137,7 @@ class Agent:
         return self.current_pos == self.end_pos
 
     def _wavefront_search(self, start_dist):
-        """
-        【V3.3 终极改进】：
-        1. 双源注水：从当前点和上一步点同时开始。
-        2. 终点绝对判定：离终点近时，不达红星绝不收网。
-        3. 动态关闭修剪：终点前水量全开。
-        """
-        # 【双源注水】：允许水流从当前点和前一步同时出发，寻找错过的岔路
+        """定向波前搜索（水波也会受到信息素的限制，绝对不进死胡同）"""
         frontier = [(self.current_pos, [])]
         if self.last_pos:
             frontier.append((self.last_pos, [self.last_pos]))
@@ -127,7 +150,7 @@ class Agent:
         min_dist_to_goal = start_dist
         start_p = self.macro_field[self.current_pos]
 
-        max_water = 30000     # 再次上调水量
+        max_water = 30000     
         max_envelope = 60     
 
         while frontier:
@@ -143,13 +166,12 @@ class Agent:
                     min_dist_to_goal = dist
                     best_envelope_path = path
                 
-                # 【关键逻辑修改】：
-                # 如果离终点很近（<25步），取消一切中间判定，必须看到终点才算成功！
                 if start_dist > 25:
                     jump_threshold = max(5, int(start_dist * 0.382))
                     if p > start_p + 0.05 or dist <= start_dist - jump_threshold:
                         return path, water_volume
                 
+                # 水流会自动避开 self.forbidden_cells，极大地节省了算力！
                 for n in self.get_physical_neighbors(curr):
                     if n not in flooded:
                         flooded.add(n)
@@ -157,9 +179,8 @@ class Agent:
                         
             if water_volume > max_water: break
                 
-            # 【修剪优化】：如果离终点较近，彻底关闭修剪，保留所有火种
             if len(next_frontier) > max_envelope and start_dist > 30:
-                scored_frontier = []
+                scored_frontier =[]
                 for n, pth in next_frontier:
                     n_dist = abs(n[0] - self.end_pos[0]) + abs(n[1] - self.end_pos[1])
                     score = n_dist - (self.macro_field[n] * 15.0)
@@ -185,33 +206,40 @@ def run_and_render():
         if agent.step(): break
             
     is_success = (agent.current_pos == agent.end_pos)
-    shortest_path = []
+    shortest_path =[]
     if is_success:
         path_dict = {pos: i for i, pos in enumerate(agent.path)}
         curr = agent.start_pos
         while curr != agent.end_pos:
             shortest_path.append(curr)
-            neighbors = [n for n in agent.get_physical_neighbors(curr) if n in path_dict]
+            neighbors =[n for n in agent.get_physical_neighbors(curr) if n in path_dict]
+            if not neighbors: break
             curr = max(neighbors, key=lambda n: path_dict[n])
         shortest_path.append(agent.end_pos)
 
     fig = plt.figure(figsize=(16, 8))
-    fig.suptitle('Wavefront V3.3: Dual-Source & Ultimate Goal Focus', fontsize=16, color='g' if is_success else 'r')
+    fig.suptitle('Physical Execution: Gene Expression & Pheromone Collapse (V4.0)', fontsize=16, color='g' if is_success else 'r')
+    
     ax1 = fig.add_subplot(121)
     ax1.imshow(maze_matrix, cmap='gray')
+    # 因为我们把禁区变成了 -1.0，cmap 会自动把死胡同变成深黑色！
     ax1.imshow(macro_field, cmap='magma', alpha=0.5)
+    
     path_y, path_x = zip(*agent.path)
     ax1.plot(path_x, path_y, color='magenta', alpha=0.6, linewidth=1.5, label='Exploration')
-    if is_success:
+    if is_success and shortest_path:
         opt_y, opt_x = zip(*shortest_path)
         ax1.plot(opt_x, opt_y, color='#00FF00', linewidth=3.0, label='Success Path')
+        
     ax1.plot(agent.start_pos[1], agent.start_pos[0], marker='*', color='cyan', markersize=15)
     ax1.plot(agent.end_pos[1], agent.end_pos[0], marker='*', color='red', markersize=15)
+    
     if not is_success: ax1.plot(agent.current_pos[1], agent.current_pos[0], 'ks', markersize=12)
     if agent.mcts_triggers:
         ty, tx = zip(*agent.mcts_triggers)
         ax1.scatter(tx, ty, c='yellow', marker='X', s=80, edgecolors='black')
-    ax1.legend()
+        
+    ax1.legend(loc='upper right')
     ax2 = fig.add_subplot(122)
     ax2.plot(agent.delta_p_list, color='r')
     ax2.set_yscale('log')
